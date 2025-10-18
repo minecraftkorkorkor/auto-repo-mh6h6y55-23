@@ -1,10 +1,9 @@
 'use strict';
 
 /**
- * Frida helpers for inspecting Addressables lookups and managed string creation
- * in Bouncy (Unity / IL2CPP).
+ * Bouncy (Unity / IL2CPP) Addressables 및 문자열 추적을 위한 Frida 스크립트.
  *
- * Example usage:
+ * 실행 예시 (USB 디버깅, 앱을 Frida가 시작하도록 할 때):
  *   frida -U -f com.raongames.bouneball -l frida_item21.js --no-pause
  */
 
@@ -28,18 +27,53 @@ function lowercaseMatch(str) {
   return false;
 }
 
+function findModuleBase(name) {
+  if (typeof Module !== 'undefined') {
+    if (typeof Module.findBaseAddress === 'function') {
+      const base = Module.findBaseAddress(name);
+      if (base) {
+        return base;
+      }
+    } else {
+      log('Module.findBaseAddress 미지원: Process API로 대체합니다.');
+    }
+  }
+
+  if (typeof Process !== 'undefined') {
+    if (typeof Process.findModuleByName === 'function') {
+      try {
+        const moduleInfo = Process.findModuleByName(name);
+        if (moduleInfo) {
+          return moduleInfo.base;
+        }
+      } catch (err) {
+        if (String(err).indexOf('not found') === -1) {
+          throw err;
+        }
+      }
+    }
+
+    if (typeof Process.enumerateModules === 'function') {
+      const modules = Process.enumerateModules();
+      for (const moduleInfo of modules) {
+        if (moduleInfo.name === name) {
+          return moduleInfo.base;
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
 function waitForModule(name, { pollIntervalMs = 100, timeoutMs = 0 } = {}) {
   const start = Date.now();
 
   while (true) {
-    try {
-      const base = Module.findBaseAddress(name);
-      if (base) {
-        log(name + ' loaded at ' + base);
-        return base;
-      }
-    } catch (err) {
-      throw err;
+    const base = findModuleBase(name);
+    if (base) {
+      log(name + ' loaded at ' + base);
+      return base;
     }
 
     if (timeoutMs > 0 && Date.now() - start > timeoutMs) {
@@ -49,7 +83,6 @@ function waitForModule(name, { pollIntervalMs = 100, timeoutMs = 0 } = {}) {
     if (typeof Thread !== 'undefined' && typeof Thread.sleep === 'function') {
       Thread.sleep(pollIntervalMs / 1000);
     } else {
-      // Fall back to yielding the scheduler when Thread.sleep is unavailable.
       const deadline = Date.now() + pollIntervalMs;
       while (Date.now() < deadline) {}
     }
@@ -62,7 +95,7 @@ function installStringHooks() {
   const stringNewUtf16 = Module.findExportByName(LIB_IL2CPP, 'il2cpp_string_new_utf16');
 
   if (!stringNew && !stringNewLen && !stringNewUtf16) {
-    log('No il2cpp string creation exports found. Skipping string watch.');
+    log('il2cpp 문자열 생성 심볼을 찾을 수 없습니다. 문자열 감시는 건너뜁니다.');
     return;
   }
 
@@ -82,12 +115,12 @@ function installStringHooks() {
             log(description + ' => ' + value);
           }
         } catch (err) {
-          log('Error decoding managed string: ' + err);
+          log('문자열 디코딩 실패: ' + err);
         }
       }
     });
 
-    log('Watching ' + description + ' at ' + symbol);
+    log(description + ' 감시 중 @ ' + symbol);
   }
 
   attachIfAvailable(stringNew, args => {
@@ -131,7 +164,7 @@ function readIl2CppString(strPtr) {
     }
     return strPtr.add(dataOffset).readUtf16String(length);
   } catch (err) {
-    log('Failed to read managed string at ' + strPtr + ': ' + err);
+    log('IL2CPP 문자열 읽기 실패 @ ' + strPtr + ': ' + err);
     return null;
   }
 }
@@ -154,7 +187,7 @@ function getObjectClassName(ptr) {
 
     return Memory.readUtf8String(namePtr);
   } catch (err) {
-    log('Unable to determine class name: ' + err);
+    log('클래스 이름 확인 실패: ' + err);
     return null;
   }
 }
@@ -162,7 +195,7 @@ function getObjectClassName(ptr) {
 function installAddressablesHook() {
   const resolveIcall = Module.findExportByName(LIB_IL2CPP, 'il2cpp_resolve_icall');
   if (!resolveIcall) {
-    log('il2cpp_resolve_icall not found. Unable to hook Addressables.');
+    log('il2cpp_resolve_icall 미발견: Addressables 후킹 불가.');
     return;
   }
 
@@ -171,11 +204,11 @@ function installAddressablesHook() {
   const target = resolve(icallName);
 
   if (target.isNull()) {
-    log('Addressables::LoadAssetAsyncInternal not resolved (possibly stripped in this build).');
+    log('Addressables::LoadAssetAsyncInternal 해석 실패 (스트립 되었을 수 있음).');
     return;
   }
 
-  log('Hooking Addressables::LoadAssetAsyncInternal at ' + target);
+  log('Addressables::LoadAssetAsyncInternal 후킹 @ ' + target);
 
   Interceptor.attach(target, {
     onEnter(args) {
@@ -188,14 +221,14 @@ function installAddressablesHook() {
 
         const asString = readIl2CppString(keyObject);
         if (asString) {
-          log('LoadAssetAsyncInternal key => ' + asString);
+          log('LoadAssetAsyncInternal 키 => ' + asString);
           return;
         }
 
         const className = getObjectClassName(keyObject) || 'UnknownType';
-        log('LoadAssetAsyncInternal key object type: ' + className + ' @ ' + keyObject);
+        log('LoadAssetAsyncInternal 키 객체 타입: ' + className + ' @ ' + keyObject);
       } catch (err) {
-        log('Error inside Addressables hook: ' + err);
+        log('Addressables 후킹 내부 오류: ' + err);
       }
     }
   });
@@ -215,23 +248,23 @@ function installHooks() {
 
   installStringHooks();
   installAddressablesHook();
-  log('Hooks installed. Waiting for matches...');
+  log('후킹 완료. item21 관련 문자열을 대기 중입니다.');
 }
 
 function main() {
-  log('Waiting for ' + LIB_IL2CPP + ' to be ready...');
+  log(LIB_IL2CPP + ' 로딩을 대기합니다...');
   try {
     const base = waitForModule(LIB_IL2CPP);
     if (base && typeof Module.ensureInitialized === 'function') {
       try {
         Module.ensureInitialized(base);
       } catch (err) {
-        log('Module.ensureInitialized failed (continuing anyway): ' + err);
+        log('Module.ensureInitialized 실패 (무시하고 진행): ' + err);
       }
     }
     installHooks();
   } catch (err) {
-    log('Failed while waiting for ' + LIB_IL2CPP + ': ' + err);
+    log(LIB_IL2CPP + ' 대기 중 오류: ' + err);
   }
 }
 
