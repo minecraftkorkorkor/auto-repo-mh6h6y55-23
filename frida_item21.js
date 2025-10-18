@@ -28,67 +28,39 @@ function lowercaseMatch(str) {
   return false;
 }
 
-function waitForModule(name) {
-  return new Promise(resolve => {
-    const base = Module.findBaseAddress(name);
-    if (base) {
-      resolve(base);
+function waitForModule(name, { pollIntervalMs = 100, timeoutMs = 0 } = {}) {
+  return new Promise((resolve, reject) => {
+    function check() {
+      try {
+        const base = Module.findBaseAddress(name);
+        if (base) {
+          log(name + ' loaded at ' + base);
+          resolve(base);
+          return true;
+        }
+      } catch (err) {
+        reject(err);
+        return true;
+      }
+      return false;
+    }
+
+    if (check()) {
       return;
     }
 
-    const callbacks = [];
-
-    function makeHandler(symbol) {
-      const address = Module.findExportByName(null, symbol);
-      if (!address) {
-        return null;
+    const start = Date.now();
+    const interval = setInterval(() => {
+      if (check()) {
+        clearInterval(interval);
+        return;
       }
 
-      return Interceptor.attach(address, {
-        onEnter(args) {
-          try {
-            this.path = args[0].readCString();
-          } catch (err) {
-            this.path = null;
-          }
-        },
-        onLeave(retval) {
-          if (retval.isNull()) {
-            return;
-          }
-
-          try {
-            if (this.path && this.path.indexOf(name) !== -1) {
-              const base = Module.findBaseAddress(name);
-              if (!base) {
-                return;
-              }
-              callbacks.splice(0).forEach(detach => detach());
-              log(name + ' loaded at ' + base);
-              resolve(base);
-            }
-          } catch (err) {
-            log('Error while watching for ' + name + ': ' + err);
-          }
-        }
-      });
-    }
-
-    const detachLater = handler => callbacks.push(() => {
-      try {
-        handler.detach();
-      } catch (err) {}
-    });
-
-    const handlers = ['android_dlopen_ext', 'dlopen']
-      .map(makeHandler)
-      .filter(Boolean);
-
-    if (handlers.length === 0) {
-      throw new Error('Unable to find dlopen style exports. Cannot watch for ' + name);
-    }
-
-    handlers.forEach(detachLater);
+      if (timeoutMs > 0 && Date.now() - start > timeoutMs) {
+        clearInterval(interval);
+        reject(new Error('Timed out waiting for ' + name));
+      }
+    }, pollIntervalMs);
   });
 }
 
