@@ -30,37 +30,30 @@ function lowercaseMatch(str) {
 
 function waitForModule(name, { pollIntervalMs = 100, timeoutMs = 0 } = {}) {
   return new Promise((resolve, reject) => {
-    function check() {
+    const start = Date.now();
+
+    function tryResolve() {
       try {
         const base = Module.findBaseAddress(name);
         if (base) {
           log(name + ' loaded at ' + base);
           resolve(base);
-          return true;
+          return;
         }
       } catch (err) {
         reject(err);
-        return true;
-      }
-      return false;
-    }
-
-    if (check()) {
-      return;
-    }
-
-    const start = Date.now();
-    const interval = setInterval(() => {
-      if (check()) {
-        clearInterval(interval);
         return;
       }
 
       if (timeoutMs > 0 && Date.now() - start > timeoutMs) {
-        clearInterval(interval);
         reject(new Error('Timed out waiting for ' + name));
+        return;
       }
-    }, pollIntervalMs);
+
+      setTimeout(tryResolve, pollIntervalMs);
+    }
+
+    tryResolve();
   });
 }
 
@@ -232,7 +225,7 @@ function main() {
     .then(() => {
       try {
         const base = Module.findBaseAddress(LIB_IL2CPP);
-        if (base) {
+        if (base && typeof Module.ensureInitialized === 'function') {
           Module.ensureInitialized(base);
         }
       } catch (err) {
