@@ -29,32 +29,31 @@ function lowercaseMatch(str) {
 }
 
 function waitForModule(name, { pollIntervalMs = 100, timeoutMs = 0 } = {}) {
-  return new Promise((resolve, reject) => {
-    const start = Date.now();
+  const start = Date.now();
 
-    function tryResolve() {
-      try {
-        const base = Module.findBaseAddress(name);
-        if (base) {
-          log(name + ' loaded at ' + base);
-          resolve(base);
-          return;
-        }
-      } catch (err) {
-        reject(err);
-        return;
+  while (true) {
+    try {
+      const base = Module.findBaseAddress(name);
+      if (base) {
+        log(name + ' loaded at ' + base);
+        return base;
       }
-
-      if (timeoutMs > 0 && Date.now() - start > timeoutMs) {
-        reject(new Error('Timed out waiting for ' + name));
-        return;
-      }
-
-      setTimeout(tryResolve, pollIntervalMs);
+    } catch (err) {
+      throw err;
     }
 
-    tryResolve();
-  });
+    if (timeoutMs > 0 && Date.now() - start > timeoutMs) {
+      throw new Error('Timed out waiting for ' + name);
+    }
+
+    if (typeof Thread !== 'undefined' && typeof Thread.sleep === 'function') {
+      Thread.sleep(pollIntervalMs / 1000);
+    } else {
+      // Fall back to yielding the scheduler when Thread.sleep is unavailable.
+      const deadline = Date.now() + pollIntervalMs;
+      while (Date.now() < deadline) {}
+    }
+  }
 }
 
 function installStringHooks() {
@@ -221,21 +220,19 @@ function installHooks() {
 
 function main() {
   log('Waiting for ' + LIB_IL2CPP + ' to be ready...');
-  waitForModule(LIB_IL2CPP)
-    .then(() => {
+  try {
+    const base = waitForModule(LIB_IL2CPP);
+    if (base && typeof Module.ensureInitialized === 'function') {
       try {
-        const base = Module.findBaseAddress(LIB_IL2CPP);
-        if (base && typeof Module.ensureInitialized === 'function') {
-          Module.ensureInitialized(base);
-        }
+        Module.ensureInitialized(base);
       } catch (err) {
         log('Module.ensureInitialized failed (continuing anyway): ' + err);
       }
-      installHooks();
-    })
-    .catch(err => {
-      log('Failed while waiting for ' + LIB_IL2CPP + ': ' + err);
-    });
+    }
+    installHooks();
+  } catch (err) {
+    log('Failed while waiting for ' + LIB_IL2CPP + ': ' + err);
+  }
 }
 
 setImmediate(main);
